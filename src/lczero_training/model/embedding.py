@@ -4,6 +4,7 @@ from flax import nnx
 
 from proto import model_config_pb2
 
+from .normalization import get_norm_class
 from .shared import Ffn
 from .utils import get_activation
 
@@ -26,6 +27,8 @@ class Embedding(nnx.Module):
         embedding_size = config.embedding_size
         self.activation = defaults.activation
 
+        norm_class = get_norm_class(defaults.normalization)
+
         assert dense_size > 0
         self.preprocess = nnx.Linear(
             in_features=64 * 12,
@@ -39,7 +42,7 @@ class Embedding(nnx.Module):
             out_features=embedding_size,
             rngs=rngs,
         )
-        self.norm = nnx.LayerNorm(embedding_size, epsilon=1e-3, rngs=rngs)
+        self.norm = norm_class(embedding_size, epsilon=1e-3, rngs=rngs)
         self.ma_gating = MaGating(feature_shape=(64, embedding_size), rngs=rngs)
         self.deepnorm_alpha = deepnorm_alpha
         self.ffn = Ffn(
@@ -49,7 +52,7 @@ class Embedding(nnx.Module):
             deepnorm_beta=deepnorm_beta,
             rngs=rngs,
         )
-        self.out_norm = nnx.LayerNorm(embedding_size, epsilon=1e-3, rngs=rngs)
+        self.out_norm = norm_class(embedding_size, epsilon=1e-3, rngs=rngs)
 
     def __call__(self, x: jax.Array) -> jax.Array:
         # Preprocess positional info and concatenate to input.

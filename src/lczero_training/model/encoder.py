@@ -1,5 +1,5 @@
 import math
-from typing import Optional
+from typing import Optional, Type, Union
 
 import jax
 import jax.numpy as jnp
@@ -8,8 +8,12 @@ from flax.linen import initializers as flax_initializers
 
 from proto import model_config_pb2
 
+from .normalization import RMSNorm, get_norm_class
 from .shared import Ffn
 from .utils import get_activation
+
+# Type alias for normalization classes
+NormClass = Type[Union[RMSNorm, nnx.LayerNorm]]
 
 
 class EncoderTower(nnx.Module):
@@ -32,6 +36,8 @@ class EncoderTower(nnx.Module):
                 rngs=rngs,
             )
 
+        norm_class = get_norm_class(defaults.normalization)
+
         self.encoders = nnx.Sequential(
             *[
                 EncoderBlock(
@@ -40,6 +46,7 @@ class EncoderTower(nnx.Module):
                     defaults=defaults,
                     smol_gen_dense=smolgen_shared_gen_dense,
                     deepnorm_beta=deepnorm_beta,
+                    norm_class=norm_class,
                     rngs=rngs,
                 )
                 for _ in range(config.num_blocks)
@@ -61,6 +68,7 @@ class EncoderBlock(nnx.Module):
         defaults: model_config_pb2.DefaultsConfig,
         smol_gen_dense: Optional[nnx.Linear],
         deepnorm_beta: float,
+        norm_class: NormClass,
         rngs: nnx.Rngs,
     ):
         assert (smol_gen_dense is not None) == config.HasField("smolgen")
@@ -70,11 +78,12 @@ class EncoderBlock(nnx.Module):
             defaults=defaults,
             smol_gen_dense=smol_gen_dense,
             deepnorm_beta=deepnorm_beta,
+            norm_class=norm_class,
             rngs=rngs,
         )
 
         self.alpha = math.pow(2.0 * config.num_blocks, -0.25)
-        self.ln1 = nnx.LayerNorm(in_features, epsilon=1e-3, rngs=rngs)
+        self.ln1 = norm_class(in_features, epsilon=1e-3, rngs=rngs)
         self.ffn = Ffn(
             in_features=in_features,
             hidden_features=config.dff,
@@ -82,7 +91,7 @@ class EncoderBlock(nnx.Module):
             deepnorm_beta=deepnorm_beta,
             rngs=rngs,
         )
-        self.ln2 = nnx.LayerNorm(in_features, epsilon=1e-3, rngs=rngs)
+        self.ln2 = norm_class(in_features, epsilon=1e-3, rngs=rngs)
 
     def __call__(self, x: jax.Array) -> jax.Array:
         x = x + self.mha(x) * self.alpha
@@ -101,6 +110,7 @@ class MultiHeadAttention(nnx.Module):
         defaults: model_config_pb2.DefaultsConfig,
         smol_gen_dense: Optional[nnx.Linear],
         deepnorm_beta: float,
+        norm_class: NormClass,
         *,
         rngs: nnx.Rngs,
     ):
@@ -145,6 +155,7 @@ class MultiHeadAttention(nnx.Module):
                 defaults=defaults,
                 heads=config.heads,
                 weight_gen_dense=smol_gen_dense,
+                norm_class=norm_class,
                 rngs=rngs,
             )
 
@@ -185,6 +196,7 @@ class Smolgen(nnx.Module):
         defaults: model_config_pb2.DefaultsConfig,
         heads: int,
         weight_gen_dense: nnx.Linear,
+        norm_class: NormClass,
         *,
         rngs: nnx.Rngs,
     ):
@@ -200,16 +212,14 @@ class Smolgen(nnx.Module):
             out_features=config.hidden_size,
             rngs=rngs,
         )
-        self.ln1 = nnx.LayerNorm(config.hidden_size, epsilon=1e-3, rngs=rngs)
+        self.ln1 = norm_class(config.hidden_size, epsilon=1e-3, rngs=rngs)
 
         self.dense2 = nnx.Linear(
             in_features=config.hidden_size,
             out_features=config.gen_size * heads,
             rngs=rngs,
         )
-        self.ln2 = nnx.LayerNorm(
-            config.gen_size * heads, epsilon=1e-3, rngs=rngs
-        )
+        self.ln2 = norm_class(config.gen_size * heads, epsilon=1e-3, rngs=rngs)
         self.weight_gen_dense = weight_gen_dense
         self.activation = config.activation or defaults.activation
 

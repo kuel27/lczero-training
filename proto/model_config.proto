@@ -5,6 +5,12 @@ import "proto/hlo.proto";
 
 package lczero.training;
 
+// Normalization type used in the model.
+enum NormalizationType {
+  LAYER_NORM = 0;  // Standard LayerNorm with mean and variance normalization
+  RMS_NORM = 1;    // RMSNorm - normalizes by root mean square only (no mean subtraction)
+}
+
 message ModelConfig {
   optional DefaultsConfig defaults = 4;
   optional EmbeddingConfig embedding = 5;
@@ -18,6 +24,7 @@ message DefaultsConfig {
   optional pblczero.XlaShapeProto.Type compute_dtype = 2;
   optional pblczero.NetworkFormat.ActivationFunction activation = 4;
   optional pblczero.NetworkFormat.ActivationFunction ffn_activation = 5;
+  optional NormalizationType normalization = 6;  // Defaults to LAYER_NORM if unset
 }
 
 message EmbeddingConfig {

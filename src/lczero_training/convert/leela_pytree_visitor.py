@@ -97,10 +97,16 @@ class LeelaPytreeWeightsVisitor:
         self,
         nnx_dict: nnx.State,
         scales: net_pb2.Weights.Layer,
-        biases: net_pb2.Weights.Layer,
+        biases: Optional[net_pb2.Weights.Layer],
     ) -> None:
+        """Convert LayerNorm or RMSNorm weights.
+
+        LayerNorm has both scale and bias parameters.
+        RMSNorm only has scale parameter (no bias).
+        """
         self.tensor(nnx_dict["scale"], scales)
-        self.tensor(nnx_dict["bias"], biases)
+        if "bias" in nnx_dict and biases is not None:
+            self.tensor(nnx_dict["bias"], biases)
 
     def policy_head(
         self, nnx_dict: nnx.State, weights: net_pb2.Weights.PolicyHeads

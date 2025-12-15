@@ -14,10 +14,14 @@ from proto.training_config_pb2 import (
 def _make_nadamw_weight_decay_mask(
     config: NadamwOptimizerConfig, params: nnx.State
 ) -> nnx.State:
-    """Creates a mask that excludes bias and LayerNorm parameters from decay."""
+    """Creates a mask that excludes bias and LayerNorm/RMSNorm params from decay."""
 
     def is_layer_norm(path: tuple[object, ...]) -> bool:
-        return any(str(s).startswith("ln") for s in path)
+        # Matches both LayerNorm (ln*) and normalization layers (norm, out_norm)
+        return any(
+            str(s).startswith("ln") or str(s) in ("norm", "out_norm")
+            for s in path
+        )
 
     def is_embedding(path: tuple[object, ...]) -> bool:
         return ("embedding", "embedding") in zip(path, path[1:])
