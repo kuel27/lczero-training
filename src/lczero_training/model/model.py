@@ -13,6 +13,7 @@ from .embedding import Embedding
 from .encoder import EncoderTower
 from .movesleft_head import MovesLeftHead
 from .policy_head import PolicyHead
+from .shared import compute_swiglu_hidden_size
 from .utils import get_dtype
 from .value_head import ValueHead
 
@@ -81,16 +82,21 @@ def _tmp_make_config() -> model_config_pb2.ModelConfig:
 
     config.defaults.compute_dtype = XlaShapeProto.BF16
     config.defaults.activation = net_pb2.NetworkFormat.ACTIVATION_MISH
-    config.defaults.ffn_activation = net_pb2.NetworkFormat.ACTIVATION_MISH
+    # Use SwiGLU for FFN - requires param-matched hidden size
+    config.defaults.ffn_activation = net_pb2.NetworkFormat.ACTIVATION_SWIGLU
 
     config.embedding.dense_size = 512
-    config.embedding.dff = 1536
     config.embedding.embedding_size = 1024
+    # SwiGLU dff: (8/3)*1024 rounded to 128 = 2816
+    config.embedding.dff = compute_swiglu_hidden_size(
+        config.embedding.embedding_size
+    )
 
     config.encoder.num_blocks = 15
-    config.encoder.dff = 1536
     config.encoder.d_model = 1024
     config.encoder.heads = 32
+    # SwiGLU dff: (8/3)*1024 rounded to 128 = 2816
+    config.encoder.dff = compute_swiglu_hidden_size(config.encoder.d_model)
 
     config.encoder.smolgen.hidden_channels = 32
     config.encoder.smolgen.hidden_size = 256
