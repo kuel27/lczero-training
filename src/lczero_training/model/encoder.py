@@ -9,6 +9,7 @@ from flax.linen import initializers as flax_initializers
 from proto import model_config_pb2
 
 from .normalization import get_norm_class
+from .rope import Axial2DRoPE
 from .shared import Ffn
 from .utils import get_activation
 
@@ -159,15 +160,29 @@ class MultiHeadAttention(nnx.Module):
                 rngs=rngs,
             )
 
+        # Axial 2D RoPE for 8x8 chessboard positional encoding
+        head_dim = depth // config.heads
+        self.rope = Axial2DRoPE(
+            head_dim=head_dim,
+            height=8,
+            width=8,
+        )
+
     def __call__(self, x: jax.Array) -> jax.Array:
         q, k, v = self.q(x), self.k(x), self.v(x)
 
         head_depth = self.depth // self.num_heads
-        # Reshape for multi-head attention.
-        q, k, v = (
-            t.reshape((-1, self.num_heads, head_depth)).transpose((1, 0, 2))
-            for t in (q, k, v)
-        )
+        # Reshape for RoPE: (64, depth) -> (1, 64, heads, head_depth)
+        q = q.reshape((1, -1, self.num_heads, head_depth))
+        k = k.reshape((1, -1, self.num_heads, head_depth))
+
+        # Apply axial 2D RoPE (expects B, S, H, D)
+        q, k = self.rope(q, k)
+
+        # Reshape for multi-head attention: (1, 64, heads, head_depth) -> (heads, 64, head_depth)
+        q = q.squeeze(0).transpose((1, 0, 2))
+        k = k.squeeze(0).transpose((1, 0, 2))
+        v = v.reshape((-1, self.num_heads, head_depth)).transpose((1, 0, 2))
 
         # Scaled dot-product attention.
         logits = jnp.einsum("...qd,...kd->...qk", q, k)
