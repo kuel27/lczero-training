@@ -8,12 +8,12 @@ from flax.linen import initializers as flax_initializers
 
 from proto import model_config_pb2
 
-from .normalization import RMSNorm, get_norm_class
+from .normalization import get_norm_class
 from .shared import Ffn
 from .utils import get_activation
 
 # Type alias for normalization classes
-NormClass = Type[Union[RMSNorm, nnx.LayerNorm]]
+NormClass = Type[Union[nnx.RMSNorm, nnx.LayerNorm]]
 
 
 class EncoderTower(nnx.Module):
