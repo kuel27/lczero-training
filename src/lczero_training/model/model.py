@@ -87,16 +87,16 @@ def _tmp_make_config() -> model_config_pb2.ModelConfig:
 
     config.embedding.dense_size = 512
     config.embedding.embedding_size = 1024
-    # SwiGLU dff: (8/3)*1024 rounded to 128 = 2816
+    # SwiGLU dff to match 4d MLP: (2/3)*4096 rounded to 128 = 2752
     config.embedding.dff = compute_swiglu_hidden_size(
-        config.embedding.embedding_size
+        4 * config.embedding.embedding_size
     )
 
     config.encoder.num_blocks = 15
     config.encoder.d_model = 1024
     config.encoder.heads = 32
-    # SwiGLU dff: (8/3)*1024 rounded to 128 = 2816
-    config.encoder.dff = compute_swiglu_hidden_size(config.encoder.d_model)
+    # SwiGLU dff to match 4d MLP: (2/3)*4096 rounded to 128 = 2752
+    config.encoder.dff = compute_swiglu_hidden_size(4 * config.encoder.d_model)
 
     config.encoder.smolgen.hidden_channels = 32
     config.encoder.smolgen.hidden_size = 256

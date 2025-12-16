@@ -17,24 +17,24 @@ class TestComputeSwigluHiddenSize:
 
     def test_basic_computation(self) -> None:
         """Test basic hidden size computation."""
-        # (8/3) * 1024 = 2730.67, ceil = 2731, round to 128 = 2816
-        assert compute_swiglu_hidden_size(1024, multiple=128) == 2816
+        # To match 4d MLP (mlp_hidden=4096): (2/3)*4096 = 2730.67, ceil = 2731, round to 128 = 2816
+        assert compute_swiglu_hidden_size(4096, multiple=128) == 2816
 
     def test_different_multiples(self) -> None:
         """Test with different rounding multiples."""
-        d = 1024
-        # (8/3) * 1024 = 2730.67, ceil = 2731
+        mlp_hidden = 4096  # 4d for d=1024
+        # (2/3) * 4096 = 2730.67, ceil = 2731
         # Round to 64: 2752
-        assert compute_swiglu_hidden_size(d, multiple=64) == 2752
+        assert compute_swiglu_hidden_size(mlp_hidden, multiple=64) == 2752
         # Round to 256: 2816
-        assert compute_swiglu_hidden_size(d, multiple=256) == 2816
+        assert compute_swiglu_hidden_size(mlp_hidden, multiple=256) == 2816
 
     def test_various_dimensions(self) -> None:
-        """Test with various model dimensions."""
-        # d=256: (8/3)*256 = 682.67, ceil = 683, round to 128 = 768
-        assert compute_swiglu_hidden_size(256, multiple=128) == 768
-        # d=512: (8/3)*512 = 1365.33, ceil = 1366, round to 128 = 1408
-        assert compute_swiglu_hidden_size(512, multiple=128) == 1408
+        """Test with various MLP hidden sizes."""
+        # mlp_hidden=1024 (4d for d=256): (2/3)*1024 = 682.67, ceil = 683, round to 128 = 768
+        assert compute_swiglu_hidden_size(1024, multiple=128) == 768
+        # mlp_hidden=2048 (4d for d=512): (2/3)*2048 = 1365.33, ceil = 1366, round to 128 = 1408
+        assert compute_swiglu_hidden_size(2048, multiple=128) == 1408
 
 
 class TestSwigluFfnParamCount:
@@ -66,8 +66,8 @@ class TestSwigluFfnParamCount:
             rngs=rngs,
         )
 
-        # SwiGLU FFN with param-matched hidden size
-        swiglu_dff = compute_swiglu_hidden_size(d, multiple=128)
+        # SwiGLU FFN with param-matched hidden size (matching 4d MLP)
+        swiglu_dff = compute_swiglu_hidden_size(mlp_dff, multiple=128)
         swiglu_ffn = Ffn(
             in_features=d,
             hidden_features=swiglu_dff,
@@ -129,7 +129,7 @@ class TestSwigluFfnForward:
 
         ffn = Ffn(
             in_features=d,
-            hidden_features=compute_swiglu_hidden_size(d),
+            hidden_features=compute_swiglu_hidden_size(4 * d),
             hidden_activation=net_pb2.NetworkFormat.ACTIVATION_SWIGLU,
             deepnorm_beta=deepnorm_beta,
             rngs=rngs,
@@ -149,7 +149,7 @@ class TestSwigluFfnForward:
 
         swiglu_ffn = Ffn(
             in_features=d,
-            hidden_features=compute_swiglu_hidden_size(d),
+            hidden_features=compute_swiglu_hidden_size(4 * d),
             hidden_activation=net_pb2.NetworkFormat.ACTIVATION_SWIGLU,
             deepnorm_beta=deepnorm_beta,
             rngs=rngs,
@@ -168,7 +168,7 @@ class TestSwigluFfnForward:
     def test_swiglu_has_correct_projections(self) -> None:
         """Test that SwiGLU FFN has gate_proj, up_proj, down_proj."""
         d = 256
-        dff = compute_swiglu_hidden_size(d)
+        dff = compute_swiglu_hidden_size(4 * d)
         deepnorm_beta = 1.0
         rngs = nnx.Rngs(params=42)
 
@@ -286,12 +286,12 @@ class TestFullModelWithSwiglu:
         d = 256
         config.embedding.dense_size = 128
         config.embedding.embedding_size = d
-        config.embedding.dff = compute_swiglu_hidden_size(d)
+        config.embedding.dff = compute_swiglu_hidden_size(4 * d)
 
         config.encoder.num_blocks = 2
         config.encoder.d_model = d
         config.encoder.heads = 8
-        config.encoder.dff = compute_swiglu_hidden_size(d)
+        config.encoder.dff = compute_swiglu_hidden_size(4 * d)
 
         config.encoder.smolgen.hidden_channels = 16
         config.encoder.smolgen.hidden_size = 64

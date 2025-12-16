@@ -10,22 +10,22 @@ from proto import net_pb2
 from .utils import get_activation
 
 
-def compute_swiglu_hidden_size(d: int, multiple: int = 128) -> int:
-    """Compute the SwiGLU hidden size for parameter-matched FFN.
+def compute_swiglu_hidden_size(mlp_hidden: int, multiple: int = 128) -> int:
+    """Compute the SwiGLU hidden size to match parameter count with standard MLP.
 
     SwiGLU uses 3 projections (gate, up, down) vs standard FFN's 2 projections.
-    To match parameters: 3 * d * hidden_swiglu = 2 * d * hidden_mlp
-    For hidden_mlp = 4d: hidden_swiglu = (8/3) * d
+    For equal parameters: 3 * d * h_swiglu = 2 * d * h_mlp
+    Therefore: h_swiglu = (2/3) * h_mlp
 
     Args:
-        d: Model dimension (input/output size).
+        mlp_hidden: The hidden size of the standard MLP to match against.
         multiple: Round up to this multiple for hardware efficiency.
 
     Returns:
-        Hidden size rounded up to the specified multiple.
+        Hidden size for SwiGLU that approximately matches MLP parameter count.
     """
-    # (8/3) * d, rounded up to multiple
-    hidden = math.ceil(8 * d / 3)
+    # (2/3) * mlp_hidden, rounded up to multiple
+    hidden = math.ceil(2 * mlp_hidden / 3)
     return ((hidden + multiple - 1) // multiple) * multiple
 
 

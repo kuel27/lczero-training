@@ -39,6 +39,7 @@ message EncoderConfig {
   optional uint32 d_model = 5;
   optional uint32 heads = 6;
   optional SmolgenConfig smolgen = 9;
+  optional bool use_rope = 10 [default = true];  // Enable 2D Axial RoPE positional encoding
 }
 
 message SmolgenConfig {

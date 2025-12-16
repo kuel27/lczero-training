@@ -1,0 +1,56 @@
+# SwiGLU only: LayerNorm + SwiGLU FFN + No RoPE
+# Tests the impact of SwiGLU in isolation
+# Note: SwiGLU dff = (2/3) * baseline_dff for parameter matching
+
+name: "benchmark-swiglu-only"
+model {
+  defaults {
+    compute_dtype: BF16
+    activation: ACTIVATION_MISH
+    ffn_activation: ACTIVATION_SWIGLU
+    normalization: LAYER_NORM
+  }
+  embedding { dense_size: 512 embedding_size: 768 dff: 1024 }  # (2/3)*1536 for param matching
+  encoder {
+    num_blocks: 8
+    dff: 1024  # (2/3)*1536 for param matching with baseline
+    d_model: 768
+    heads: 12
+    use_rope: false
+    smolgen {
+      hidden_channels: 32
+      hidden_size: 256
+      gen_size: 256
+      activation: ACTIVATION_SWISH
+    }
+  }
+  policy_head { embedding_size: 768 d_model: 768 }
+  value_head { num_channels: 128 }
+  movesleft_head { num_channels: 32 }
+}
+training {
+  schedule {
+    steps_per_network: 100
+    chunks_per_network: 0
+  }
+  lr_schedule {
+    starting_step: 0
+    duration_steps: 0
+    lr: 0.0001
+  }
+  checkpoint {
+    path: "/tmp/lczero-benchmark/swiglu_only"
+    max_to_keep: 1
+  }
+  optimizer {
+    nadamw { beta_1: 0.9 beta_2: 0.98 epsilon: 1e-7 weight_decay: 0.0001 }
+  }
+  losses {
+    policy { name: "main" weight: 1.0 illegal_moves: MASK type: CROSS_ENTROPY }
+    value { name: "winner" weight: 1.0 }
+    movesleft { name: "main" weight: 1.0 }
+  }
+}
+metrics {
+  tensorboard_path: "/tmp/lczero-benchmark/tensorboard/swiglu_only"
+}
