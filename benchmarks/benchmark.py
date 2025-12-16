@@ -1,33 +1,17 @@
-#!/usr/bin/env python3
-"""Benchmark script for comparing lczero-training feature configurations.
-
-This script measures:
-- Training throughput (steps/second)
-- Memory usage (peak GPU memory)
-- Forward/backward pass latency
-
-Usage:
-    uv run python benchmarks/benchmark.py --config benchmarks/configs/baseline.textproto
-    uv run python benchmarks/benchmark.py --all  # Run all ablation configs
-"""
+from __future__ import annotations
 
 import argparse
 import gc
 import json
 import logging
-import os
 import sys
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Any, Callable, Optional
 
-import jax
-import jax.numpy as jnp
-from flax import nnx
 from google.protobuf import text_format
 
-# Configure logging before imports that might log
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s",
@@ -35,10 +19,15 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+@dataclass(frozen=True)
+class FeatureFlags:
+    normalization: str
+    ffn_activation: str
+    use_rope: bool
+
+
 @dataclass
 class BenchmarkResult:
-    """Results from a single benchmark run."""
-
     config_name: str
     normalization: str
     ffn_activation: str
@@ -53,28 +42,140 @@ class BenchmarkResult:
     peak_memory_mb: Optional[float]
 
 
-def count_parameters(model: nnx.Module) -> int:
-    """Count total trainable parameters in a model."""
+def load_root_config(config_path: Path) -> Any:
+    from proto.root_config_pb2 import RootConfig
+
+    config = RootConfig()
+    config_text = config_path.read_text(encoding="utf-8")
+    text_format.Parse(config_text, config)
+    return config
+
+
+def extract_feature_flags(config: Any) -> FeatureFlags:
+    from proto import model_config_pb2, net_pb2
+
+    defaults = config.model.defaults
+
+    norm_map = {model_config_pb2.RMS_NORM: "RMSNorm"}
+    normalization = norm_map.get(defaults.normalization, "LayerNorm")
+
+    ffn_map = {net_pb2.NetworkFormat.ACTIVATION_SWIGLU: "SwiGLU"}
+    ffn_activation = ffn_map.get(defaults.ffn_activation, "MISH")
+
+    use_rope = bool(config.model.encoder.use_rope)
+    return FeatureFlags(
+        normalization=normalization,
+        ffn_activation=ffn_activation,
+        use_rope=use_rope,
+    )
+
+
+def count_parameters(model: Any) -> int:
+    import jax
+    from flax import nnx
+
     _, state = nnx.split(model)
     total = 0
     for leaf in jax.tree_util.tree_leaves(state):
         if hasattr(leaf, "value") and hasattr(leaf.value, "size"):
-            total += leaf.value.size
+            total += int(leaf.value.size)
         elif hasattr(leaf, "size"):
-            total += leaf.size
+            total += int(leaf.size)
     return total
 
 
-def get_peak_memory() -> Optional[int]:
-    """Get peak GPU memory usage in bytes."""
+def get_peak_memory_bytes() -> Optional[int]:
     try:
-        backend = jax.lib.xla_bridge.get_backend()
+        from jax.extend import backend as jax_backend
+        backend = jax_backend.get_backend()
         if hasattr(backend, "live_buffers"):
             buffers = backend.live_buffers()
-            return sum(b.nbytes for b in buffers)
+            return int(sum(b.nbytes for b in buffers))
     except Exception:
-        pass
+        return None
     return None
+
+
+def make_synthetic_batch_fn(batch_size: int) -> Callable[[Any], dict[str, Any]]:
+    import jax
+    import jax.numpy as jnp
+
+    def make_batch(key: Any) -> dict[str, Any]:
+        k1, k2, k3, k4, k5 = jax.random.split(key, 5)
+        return {
+            "input_planes": jax.random.normal(k1, (batch_size, 112, 8, 8)),
+            "policy_target": jax.nn.softmax(
+                jax.random.normal(k2, (batch_size, 1858)), axis=-1
+            ),
+            "value_target": jax.random.uniform(k3, (batch_size, 3)).astype(jnp.float32),
+            "movesleft_target": (jax.random.uniform(k4, (batch_size, 1)) * 100).astype(
+                jnp.float32
+            ),
+            "legal_moves_mask": jax.random.bernoulli(k5, 0.1, (batch_size, 1858)),
+        }
+
+    return make_batch
+
+
+def build_training_components(config: Any) -> tuple[Any, Any, Any, Any, Any, int]:
+    from flax import nnx
+
+    from lczero_training.model.loss_function import LczeroLoss
+    from lczero_training.model.model import LczeroModel
+    from lczero_training.training.lr_schedule import make_lr_schedule
+    from lczero_training.training.optimizer import make_gradient_transformation
+
+    rngs = nnx.Rngs(params=42)
+    model = LczeroModel(config=config.model, rngs=rngs)
+    num_params = count_parameters(model)
+
+    lr_sched = make_lr_schedule(config.training.lr_schedule)
+    optimizer_tx = make_gradient_transformation(
+        config.training.optimizer,
+        max_grad_norm=getattr(config.training, "max_grad_norm", 0.0),
+        lr_schedule=lr_sched,
+    )
+
+    graphdef, state = nnx.split(model)
+    opt_state = optimizer_tx.init(state)
+    loss_fn = LczeroLoss(config=config.training.losses)
+
+    return graphdef, state, optimizer_tx, opt_state, loss_fn, num_params
+
+
+def make_train_step(
+    graphdef: Any, optimizer_tx: Any, loss_fn: Any
+) -> Callable[[Any, Any, dict[str, Any]], tuple[Any, Any, Any]]:
+    import jax
+    import jax.numpy as jnp
+    import optax
+    from flax import nnx
+
+    def loss_from_state(state: Any, batch: dict[str, Any]) -> Any:
+        model = nnx.merge(graphdef, state)
+
+        def loss_for_one_sample(model_arg: Any, batch_arg: dict[str, Any]) -> Any:
+            loss, _ = loss_fn(
+                model_arg,
+                inputs=batch_arg["input_planes"],
+                value_targets=batch_arg["value_target"],
+                policy_targets=batch_arg["policy_target"],
+                movesleft_targets=batch_arg["movesleft_target"],
+            )
+            return loss
+
+        loss_vmap = jax.vmap(loss_for_one_sample, in_axes=(None, 0), out_axes=0)
+        per_sample_loss = loss_vmap(model, batch)
+        return jnp.mean(per_sample_loss)
+
+    @jax.jit
+    def train_step(state: Any, opt_state: Any, batch: dict[str, Any]) -> tuple[Any, Any, Any]:
+        loss, grads = jax.value_and_grad(loss_from_state)(state, batch)
+        updates, new_opt_state = optimizer_tx.update(grads, opt_state, state)
+        new_state = optax.apply_updates(state, updates)
+        return new_state, new_opt_state, loss
+
+    return train_step
 
 
 def run_benchmark(
@@ -83,169 +184,66 @@ def run_benchmark(
     benchmark_steps: int = 50,
     batch_size: int = 64,
 ) -> BenchmarkResult:
-    """Run benchmark on a single configuration.
+    import jax
 
-    Args:
-        config_path: Path to the textproto configuration file.
-        warmup_steps: Number of warmup steps before timing.
-        benchmark_steps: Number of steps to time.
-        batch_size: Batch size for synthetic data.
+    config_file = Path(config_path)
+    config = load_root_config(config_file)
+    config_name = config_file.stem
 
-    Returns:
-        BenchmarkResult with timing and memory statistics.
-    """
-    # Import here to avoid loading JAX before argument parsing
-    from lczero_training.model.loss_function import LczeroLoss
-    from lczero_training.model.model import LczeroModel
-    from lczero_training.training.lr_schedule import make_lr_schedule
-    from lczero_training.training.optimizer import make_gradient_transformation
-    from proto import model_config_pb2, net_pb2
-    from proto.root_config_pb2 import RootConfig
+    flags = extract_feature_flags(config)
 
-    logger.info(f"Loading configuration from {config_path}")
-    config = RootConfig()
-    with open(config_path, "r") as f:
-        text_format.Parse(f.read(), config)
+    logger.info("Config: %s", config_name)
+    logger.info("  Normalization: %s", flags.normalization)
+    logger.info("  FFN Activation: %s", flags.ffn_activation)
+    logger.info("  RoPE: %s", flags.use_rope)
 
-    config_name = Path(config_path).stem
+    graphdef, state, optimizer_tx, opt_state, loss_fn, num_params = build_training_components(config)
+    logger.info("  Parameters: %s", f"{num_params:,}")
 
-    # Extract feature flags for reporting
-    defaults = config.model.defaults
-    norm_type = "RMSNorm" if defaults.normalization == model_config_pb2.RMS_NORM else "LayerNorm"
-    ffn_type = (
-        "SwiGLU"
-        if defaults.ffn_activation == net_pb2.NetworkFormat.ACTIVATION_SWIGLU
-        else "MISH"
-    )
-    use_rope = config.model.encoder.use_rope
+    make_batch = make_synthetic_batch_fn(batch_size=batch_size)
+    train_step = make_train_step(graphdef, optimizer_tx, loss_fn)
 
-    logger.info(f"Config: {config_name}")
-    logger.info(f"  Normalization: {norm_type}")
-    logger.info(f"  FFN Activation: {ffn_type}")
-    logger.info(f"  RoPE: {use_rope}")
-
-    # Create model
-    logger.info("Creating model...")
-    rngs = nnx.Rngs(params=42)
-    model = LczeroModel(config=config.model, rngs=rngs)
-    num_params = count_parameters(model)
-    logger.info(f"  Parameters: {num_params:,}")
-
-    # Create optimizer
-    lr_sched = make_lr_schedule(config.training.lr_schedule)
-    optimizer_tx = make_gradient_transformation(
-        config.training.optimizer,
-        max_grad_norm=getattr(config.training, "max_grad_norm", 0.0),
-        lr_schedule=lr_sched,
-    )
-
-    # Split model for training
-    graphdef, state = nnx.split(model)
-    opt_state = optimizer_tx.init(state)
-
-    # Create loss function
-    loss_fn = LczeroLoss(config=config.training.losses)
-
-    # Create synthetic training data
     key = jax.random.key(0)
 
-    def make_batch(key: jax.Array) -> dict:
-        """Generate a synthetic training batch."""
-        k1, k2, k3, k4, k5 = jax.random.split(key, 5)
-        return {
-            "input_planes": jax.random.normal(k1, (batch_size, 112, 8, 8)),
-            "policy_target": jax.nn.softmax(
-                jax.random.normal(k2, (batch_size, 1858)), axis=-1
-            ),
-            "value_target": jax.random.uniform(k3, (batch_size, 3)),
-            "movesleft_target": jax.random.uniform(k4, (batch_size, 1)) * 100,
-            "legal_moves_mask": jax.random.bernoulli(k5, 0.1, (batch_size, 1858)),
-        }
-
-    @jax.jit
-    def train_step(
-        state: nnx.State,
-        opt_state: nnx.State,
-        batch: dict,
-    ) -> tuple[nnx.State, nnx.State, jax.Array]:
-        """Single training step."""
-
-        def loss_wrapper(state: nnx.State) -> jax.Array:
-            model = nnx.merge(graphdef, state)
-
-            def loss_for_grad(
-                model_arg: LczeroModel, batch_arg: dict
-            ) -> jax.Array:
-                loss, _ = loss_fn(
-                    model_arg,
-                    inputs=batch_arg["input_planes"],
-                    value_targets=batch_arg["value_target"],
-                    policy_targets=batch_arg["policy_target"],
-                    movesleft_targets=batch_arg["movesleft_target"],
-                )
-                return loss
-
-            # vmap over batch dimension
-            loss_vfn = jax.vmap(
-                loss_for_grad,
-                in_axes=(None, 0),
-                out_axes=0,
-            )
-            per_sample_loss = loss_vfn(model, batch)
-            return jnp.mean(per_sample_loss)
-
-        loss, grads = jax.value_and_grad(loss_wrapper)(state)
-        updates, new_opt_state = optimizer_tx.update(grads, opt_state, state)
-        new_state = jax.tree_util.tree_map(
-            lambda p, u: p + u, state, updates
-        )
-        return new_state, new_opt_state, loss
-
-    # Warmup
-    logger.info(f"Running {warmup_steps} warmup steps...")
-    for i in range(warmup_steps):
+    logger.info("Running %d warmup steps...", warmup_steps)
+    for _ in range(warmup_steps):
         key, subkey = jax.random.split(key)
         batch = make_batch(subkey)
         state, opt_state, loss = train_step(state, opt_state, batch)
-        # Block to ensure warmup completes
         loss.block_until_ready()
 
-    # Clear caches
     gc.collect()
 
-    # Benchmark
-    logger.info(f"Running {benchmark_steps} benchmark steps...")
+    logger.info("Running %d benchmark steps...", benchmark_steps)
     start_time = time.perf_counter()
 
-    for i in range(benchmark_steps):
+    for _ in range(benchmark_steps):
         key, subkey = jax.random.split(key)
         batch = make_batch(subkey)
         state, opt_state, loss = train_step(state, opt_state, batch)
 
-    # Ensure all async operations complete
     loss.block_until_ready()
     end_time = time.perf_counter()
 
     total_time = end_time - start_time
     steps_per_second = benchmark_steps / total_time
-    avg_step_time_ms = (total_time / benchmark_steps) * 1000
+    avg_step_time_ms = (total_time / benchmark_steps) * 1000.0
 
-    # Get memory usage
-    peak_memory = get_peak_memory()
-    peak_memory_mb = peak_memory / (1024 * 1024) if peak_memory else None
+    peak_memory = get_peak_memory_bytes()
+    peak_memory_mb = (peak_memory / (1024 * 1024)) if peak_memory is not None else None
 
-    logger.info(f"Results for {config_name}:")
-    logger.info(f"  Total time: {total_time:.2f}s")
-    logger.info(f"  Steps/second: {steps_per_second:.2f}")
-    logger.info(f"  Avg step time: {avg_step_time_ms:.2f}ms")
-    if peak_memory_mb:
-        logger.info(f"  Peak memory: {peak_memory_mb:.2f}MB")
+    logger.info("Results for %s:", config_name)
+    logger.info("  Total time: %.2fs", total_time)
+    logger.info("  Steps/second: %.2f", steps_per_second)
+    logger.info("  Avg step time: %.2fms", avg_step_time_ms)
+    if peak_memory_mb is not None:
+        logger.info("  Peak memory: %.2fMB", peak_memory_mb)
 
     return BenchmarkResult(
         config_name=config_name,
-        normalization=norm_type,
-        ffn_activation=ffn_type,
-        use_rope=use_rope,
+        normalization=flags.normalization,
+        ffn_activation=flags.ffn_activation,
+        use_rope=flags.use_rope,
         num_params=num_params,
         warmup_steps=warmup_steps,
         benchmark_steps=benchmark_steps,
@@ -257,36 +255,7 @@ def run_benchmark(
     )
 
 
-def run_all_benchmarks(
-    configs_dir: str = "benchmarks/configs",
-    output_file: Optional[str] = None,
-    **kwargs,
-) -> list[BenchmarkResult]:
-    """Run benchmarks on all configuration files in a directory."""
-    configs_path = Path(configs_dir)
-    config_files = sorted(configs_path.glob("*.textproto"))
-
-    if not config_files:
-        logger.error(f"No .textproto files found in {configs_dir}")
-        return []
-
-    results = []
-    for config_file in config_files:
-        logger.info(f"\n{'='*60}")
-        logger.info(f"Benchmarking: {config_file.name}")
-        logger.info(f"{'='*60}")
-
-        try:
-            result = run_benchmark(str(config_file), **kwargs)
-            results.append(result)
-        except Exception as e:
-            logger.error(f"Failed to benchmark {config_file.name}: {e}")
-            continue
-
-        # Clear GPU memory between runs
-        gc.collect()
-
-    # Print summary table
+def _print_summary(results: list[BenchmarkResult]) -> None:
     print("\n" + "=" * 80)
     print("BENCHMARK SUMMARY")
     print("=" * 80)
@@ -295,73 +264,76 @@ def run_all_benchmarks(
         f"{'Params':<12} {'Steps/s':<10} {'ms/step':<10}"
     )
     print("-" * 80)
-
     for r in results:
         print(
             f"{r.config_name:<20} {r.normalization:<10} {r.ffn_activation:<8} "
             f"{str(r.use_rope):<6} {r.num_params:<12,} {r.steps_per_second:<10.2f} "
             f"{r.avg_step_time_ms:<10.2f}"
         )
-
     print("=" * 80)
 
-    # Save results to JSON if output file specified
+
+def run_all_benchmarks(
+    configs_dir: str = "benchmarks/configs",
+    output_file: Optional[str] = None,
+    **kwargs: Any,
+) -> list[BenchmarkResult]:
+    configs_path = Path(configs_dir)
+    config_files = sorted(configs_path.glob("*.textproto"))
+
+    if not config_files:
+        logger.error("No .textproto files found in %s", configs_dir)
+        return []
+
+    results: list[BenchmarkResult] = []
+    for config_file in config_files:
+        logger.info("\n%s", "=" * 60)
+        logger.info("Benchmarking: %s", config_file.name)
+        logger.info("%s", "=" * 60)
+
+        try:
+            results.append(run_benchmark(str(config_file), **kwargs))
+        except Exception as e:
+            logger.exception("Failed to benchmark %s: %s", config_file.name, e)
+
+        gc.collect()
+
+    _print_summary(results)
+
     if output_file:
-        with open(output_file, "w") as f:
-            json.dump([asdict(r) for r in results], f, indent=2)
-        logger.info(f"Results saved to {output_file}")
+        Path(output_file).write_text(
+            json.dumps([asdict(r) for r in results], indent=2),
+            encoding="utf-8",
+        )
+        logger.info("Results saved to %s", output_file)
 
     return results
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(
-        description="Benchmark lczero-training configurations"
-    )
-    parser.add_argument(
-        "--config",
-        type=str,
-        help="Path to a single configuration file to benchmark",
-    )
-    parser.add_argument(
-        "--all",
-        action="store_true",
-        help="Run benchmarks on all configs in benchmarks/configs/",
-    )
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Benchmark lczero-training configurations")
+    parser.add_argument("--config", type=str, help="Path to a single configuration file to benchmark")
+    parser.add_argument("--all", action="store_true", help="Run benchmarks on all configs in benchmarks/configs/")
     parser.add_argument(
         "--configs-dir",
         type=str,
         default="benchmarks/configs",
         help="Directory containing configuration files (default: benchmarks/configs)",
     )
-    parser.add_argument(
-        "--warmup-steps",
-        type=int,
-        default=10,
-        help="Number of warmup steps (default: 10)",
-    )
-    parser.add_argument(
-        "--benchmark-steps",
-        type=int,
-        default=50,
-        help="Number of steps to benchmark (default: 50)",
-    )
-    parser.add_argument(
-        "--batch-size",
-        type=int,
-        default=64,
-        help="Batch size for synthetic data (default: 64)",
-    )
-    parser.add_argument(
-        "--output",
-        type=str,
-        help="Output JSON file for results",
-    )
-
-    args = parser.parse_args()
+    parser.add_argument("--warmup-steps", type=int, default=10, help="Number of warmup steps (default: 10)")
+    parser.add_argument("--benchmark-steps", type=int, default=50, help="Number of steps to benchmark (default: 50)")
+    parser.add_argument("--batch-size", type=int, default=64, help="Batch size for synthetic data (default: 64)")
+    parser.add_argument("--output", type=str, help="Output JSON file for results")
+    args = parser.parse_args(argv)
 
     if not args.config and not args.all:
         parser.error("Either --config or --all must be specified")
+
+    return args
+
+
+def main(argv: Optional[list[str]] = None) -> int:
+    args = parse_args(sys.argv[1:] if argv is None else argv)
 
     benchmark_kwargs = {
         "warmup_steps": args.warmup_steps,
@@ -376,13 +348,13 @@ def main() -> int:
             **benchmark_kwargs,
         )
         return 0 if results else 1
-    else:
-        result = run_benchmark(args.config, **benchmark_kwargs)
-        if args.output:
-            with open(args.output, "w") as f:
-                json.dump([asdict(result)], f, indent=2)
-        return 0
+
+    result = run_benchmark(args.config, **benchmark_kwargs)
+    if args.output:
+        Path(args.output).write_text(json.dumps([asdict(result)], indent=2), encoding="utf-8")
+        logger.info("Results saved to %s", args.output)
+    return 0
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    raise SystemExit(main())
