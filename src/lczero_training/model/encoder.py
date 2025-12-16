@@ -163,20 +163,15 @@ class MultiHeadAttention(nnx.Module):
             self.smolgen = None
 
         # Axial 2D RoPE for 8x8 chessboard positional encoding (optional)
-        head_dim = depth // config.heads
+        # When disabled, we don't create the module at all to avoid zero-size
+        # arrays that can't be serialized by orbax-checkpoint.
+        # Note: We only set self.rope when enabled; check self.use_rope in __call__
         if self.use_rope:
+            head_dim = depth // config.heads
             self.rope = Axial2DRoPE(
                 head_dim=head_dim,
                 height=8,
                 width=8,
-            )
-        else:
-            # Use a dummy RoPE with rotary_dim=0 that passes through unchanged
-            self.rope = Axial2DRoPE(
-                head_dim=head_dim,
-                height=8,
-                width=8,
-                rotary_dim=0,  # This disables rotation but keeps consistent structure
             )
 
     def __call__(self, x: jax.Array) -> jax.Array:
@@ -184,17 +179,23 @@ class MultiHeadAttention(nnx.Module):
 
         head_depth = self.depth // self.num_heads
 
-        # Reshape for RoPE: (64, depth) -> (1, 64, heads, head_depth)
-        q = q.reshape((1, -1, self.num_heads, head_depth))
-        k = k.reshape((1, -1, self.num_heads, head_depth))
+        # Apply axial 2D RoPE if enabled
+        if self.use_rope:
+            # Reshape for RoPE: (64, depth) -> (1, 64, heads, head_depth)
+            q = q.reshape((1, -1, self.num_heads, head_depth))
+            k = k.reshape((1, -1, self.num_heads, head_depth))
 
-        # Apply axial 2D RoPE (expects B, S, H, D)
-        # When use_rope=False, rope has rotary_dim=0 and acts as identity
-        q, k = self.rope(q, k)
+            # Apply axial 2D RoPE (expects B, S, H, D)
+            q, k = self.rope(q, k)
 
-        # Reshape for multi-head attention: (1, 64, heads, head_depth) -> (heads, 64, head_depth)
-        q = q.squeeze(0).transpose((1, 0, 2))
-        k = k.squeeze(0).transpose((1, 0, 2))
+            # Reshape for multi-head attention: (1, 64, heads, head_depth) -> (heads, 64, head_depth)
+            q = q.squeeze(0).transpose((1, 0, 2))
+            k = k.squeeze(0).transpose((1, 0, 2))
+        else:
+            # No RoPE: just reshape for multi-head attention
+            q = q.reshape((-1, self.num_heads, head_depth)).transpose((1, 0, 2))
+            k = k.reshape((-1, self.num_heads, head_depth)).transpose((1, 0, 2))
+
         v = v.reshape((-1, self.num_heads, head_depth)).transpose((1, 0, 2))
 
         # Scaled dot-product attention.

@@ -15,7 +15,7 @@ cpp_compiler = meson.get_compiler('cpp')
 if cpp_compiler.get_id() == 'clang'
   add_project_arguments('-Wno-nullability-extension', language : 'cpp')
 endif
-add_project_arguments('-Werror', language : 'cpp')
+# add_project_arguments('-Werror', language : 'cpp')  # Disabled due to GCC warning in abseil-cpp
 
 
 # External dependencies

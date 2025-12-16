@@ -1,0 +1,1 @@
+step,total_loss,policy_loss,value_loss,movesleft_loss,grad_norm,elapsed_seconds

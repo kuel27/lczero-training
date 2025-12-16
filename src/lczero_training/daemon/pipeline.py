@@ -147,10 +147,13 @@ class TrainingPipeline:
             lr_schedule=self._lr_schedule,
         )
         model_state = nnx.state(self._model)
+        # Filter to trainable params only for optimizer initialization.
+        # Non-Param variables (like RoPECache) don't receive gradients.
+        params_only = model_state.filter(nnx.Param)
         jit_state = JitTrainingState(
             step=0,
             model_state=model_state,
-            opt_state=optimizer_tx.init(model_state),
+            opt_state=optimizer_tx.init(params_only),
             swa_state=model_state,
             num_averages=0.0,
         )

@@ -65,12 +65,16 @@ class TrainingState:
     ) -> "TrainingState":
         rngs = nnx.Rngs(params=42)
         model_state = nnx.state(LczeroModel(config=model_config, rngs=rngs))
+        # Filter to trainable params only for optimizer initialization.
+        # Non-Param variables (like RoPECache) don't receive gradients from
+        # nnx.value_and_grad, so optimizer state must match the gradient structure.
+        params_only = model_state.filter(nnx.Param)
         lr_sched = make_lr_schedule(training_config.lr_schedule)
         opt_state = make_gradient_transformation(
             training_config.optimizer,
             max_grad_norm=getattr(training_config, "max_grad_norm", 0.0),
             lr_schedule=lr_sched,
-        ).init(model_state)
+        ).init(params_only)
         jit_state = JitTrainingState(
             step=0,
             model_state=model_state,

@@ -125,5 +125,7 @@ GEMINI.md
 .vscode/
 .idea/
 
+data/
+
 prompt.md
 prompt.py

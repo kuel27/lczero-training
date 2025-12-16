@@ -2,6 +2,111 @@
 # Tests the impact of 2D Axial RoPE in isolation
 
 name: "benchmark-rope-only"
+
+data_loader {
+  stage {
+    name: "file_path_provider"
+    file_path_provider {
+      directory: "/home/phantom/lczero-training/data"
+      output { queue_capacity: 16 }
+    }
+  }
+  stage {
+    name: "chunk_source_loader"
+    input: "file_path_provider"
+    chunk_source_loader {
+      threads: 2
+      output { queue_capacity: 16 }
+    }
+  }
+  stage {
+    name: "chunk_source_splitter"
+    input: "chunk_source_loader"
+    chunk_source_splitter {
+      output { name: "train" queue_capacity: 16 }
+      output { name: "test" queue_capacity: 16 }
+      weight: 90
+      weight: 10
+    }
+  }
+  stage {
+    name: "train_chunk_pool"
+    input: "chunk_source_splitter.train"
+    shuffling_chunk_pool {
+      chunk_pool_size: 100000
+      source_ingestion_threads: 2
+      chunk_loading_threads: 4
+      output { queue_capacity: 16 }
+    }
+  }
+  stage {
+    name: "test_chunk_pool"
+    input: "chunk_source_splitter.test"
+    shuffling_chunk_pool {
+      chunk_pool_size: 20000
+      source_ingestion_threads: 1
+      chunk_loading_threads: 2
+      output { queue_capacity: 16 }
+    }
+  }
+  stage {
+    name: "train_unpacker"
+    input: "train_chunk_pool"
+    chunk_unpacker {
+      threads: 2
+      position_sampling_rate: 0.05
+      output { queue_capacity: 16 }
+    }
+  }
+  stage {
+    name: "test_unpacker"
+    input: "test_chunk_pool"
+    chunk_unpacker {
+      threads: 1
+      position_sampling_rate: 0.05
+      output { queue_capacity: 16 }
+    }
+  }
+  stage {
+    name: "train_sampler"
+    input: "train_unpacker"
+    shuffling_frame_sampler {
+      threads: 2
+      reservoir_size_per_thread: 500000
+      output { queue_capacity: 16 }
+    }
+  }
+  stage {
+    name: "test_sampler"
+    input: "test_unpacker"
+    shuffling_frame_sampler {
+      threads: 1
+      reservoir_size_per_thread: 100000
+      output { queue_capacity: 16 }
+    }
+  }
+  stage {
+    name: "train_tensor_generator"
+    input: "train_sampler"
+    tensor_generator {
+      threads: 2
+      batch_size: 256
+      output { queue_capacity: 8 }
+    }
+  }
+  stage {
+    name: "test_tensor_generator"
+    input: "test_sampler"
+    tensor_generator {
+      threads: 1
+      batch_size: 256
+      output { queue_capacity: 8 }
+    }
+  }
+  output: "train:train_tensor_generator"
+  output: "test:test_tensor_generator"
+}
+
 model {
   defaults {
     compute_dtype: BF16
@@ -29,27 +134,39 @@ model {
 }
 training {
   schedule {
-    steps_per_network: 100
-    chunks_per_network: 0
+    steps_per_network: 500
+    chunks_per_network: 0  # SL mode: start new epoch immediately
   }
   lr_schedule {
+    # Warmup phase
     starting_step: 0
-    duration_steps: 0
-    lr: 0.0001
+    duration_steps: 1000
+    lr: 0.0
+    transition: LINEAR
+  }
+  lr_schedule {
+    # Main training phase
+    starting_step: 1000
+    duration_steps: 0  # indefinite
+    lr: 0.001
   }
   checkpoint {
-    path: "/tmp/lczero-benchmark/rope_only"
-    max_to_keep: 1
+    path: "/tmp/lczero-benchmark/rope_only/checkpoint"
+    max_to_keep: 5
   }
   optimizer {
     nadamw { beta_1: 0.9 beta_2: 0.98 epsilon: 1e-7 weight_decay: 0.0001 }
   }
+  max_grad_norm: 1.0
   losses {
     policy { name: "main" weight: 1.0 illegal_moves: MASK type: CROSS_ENTROPY }
     value { name: "winner" weight: 1.0 }
-    movesleft { name: "main" weight: 1.0 }
+    movesleft { name: "main" weight: 0.5 }
   }
 }
 metrics {
   tensorboard_path: "/tmp/lczero-benchmark/tensorboard/rope_only"
+}
+export {
+  path: "/tmp/lczero-benchmark/rope_only/exported/"
 }

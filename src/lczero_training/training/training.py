@@ -125,13 +125,19 @@ class Training:
             (mean_loss, unweighted_losses), mean_grads = grad_fn(model, batch)
             grad_norm = optax.global_norm(mean_grads)
 
+            # Split model state into trainable params and non-trainable rest.
+            # nnx.value_and_grad only produces gradients for nnx.Param variables,
+            # so we must match that structure for the optimizer update.
+            params, rest = jit_state.model_state.split(nnx.Param, ...)
+
             assert jit_state.opt_state is not None
             updates, new_opt_state = optimizer_tx.update(
-                mean_grads, jit_state.opt_state, jit_state.model_state
+                mean_grads, jit_state.opt_state, params
             )
-            new_model_state = optax.apply_updates(
-                jit_state.model_state, updates
-            )
+            new_params = optax.apply_updates(params, updates)
+
+            # Merge updated params back with non-trainable state (e.g., RoPECache)
+            new_model_state = nnx.State.merge(new_params, rest)
 
             new_jit_state = jit_state.replace(
                 step=jit_state.step + 1,
