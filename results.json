@@ -7,11 +7,11 @@
     "num_params": 80975012,
     "warmup_steps": 20,
     "benchmark_steps": 100,
-    "total_time_seconds": 45.101692162999825,
-    "steps_per_second": 2.217211709897599,
-    "avg_step_time_ms": 451.01692162999825,
-    "peak_memory_bytes": 1300476308,
-    "peak_memory_mb": 1240.2308540344238
+    "total_time_seconds": 45.19266627100001,
+    "steps_per_second": 2.212748400378618,
+    "avg_step_time_ms": 451.9266627100001,
+    "peak_memory_bytes": 976576248,
+    "peak_memory_mb": 931.3356857299805
   },
   {
     "config_name": "baseline",
@@ -21,11 +21,11 @@
     "num_params": 80978084,
     "warmup_steps": 20,
     "benchmark_steps": 100,
-    "total_time_seconds": 46.43888007699934,
-    "steps_per_second": 2.153368036313367,
-    "avg_step_time_ms": 464.3888007699934,
-    "peak_memory_bytes": 1300525460,
-    "peak_memory_mb": 1240.2777290344238
+    "total_time_seconds": 44.76847898599999,
+    "steps_per_second": 2.2337144853921,
+    "avg_step_time_ms": 447.6847898599999,
+    "peak_memory_bytes": 976613112,
+    "peak_memory_mb": 931.3708419799805
   },
   {
     "config_name": "rmsnorm_only",
@@ -35,11 +35,11 @@
     "num_params": 80937636,
     "warmup_steps": 20,
     "benchmark_steps": 100,
-    "total_time_seconds": 46.80779235599948,
-    "steps_per_second": 2.136396419626971,
-    "avg_step_time_ms": 468.0779235599948,
-    "peak_memory_bytes": 1299878292,
-    "peak_memory_mb": 1239.6605415344238
+    "total_time_seconds": 44.764235996,
+    "steps_per_second": 2.2339262086129588,
+    "avg_step_time_ms": 447.64235995999996,
+    "peak_memory_bytes": 976127736,
+    "peak_memory_mb": 930.9079513549805
   },
   {
     "config_name": "rope_only",
@@ -49,11 +49,11 @@
     "num_params": 81010852,
     "warmup_steps": 20,
     "benchmark_steps": 100,
-    "total_time_seconds": 46.66165251700022,
-    "steps_per_second": 2.143087409164668,
-    "avg_step_time_ms": 466.6165251700022,
-    "peak_memory_bytes": 1301049748,
-    "peak_memory_mb": 1240.7777290344238
+    "total_time_seconds": 46.244984122000005,
+    "steps_per_second": 2.1623966771442196,
+    "avg_step_time_ms": 462.44984122000005,
+    "peak_memory_bytes": 977006328,
+    "peak_memory_mb": 931.7458419799805
   },
   {
     "config_name": "swiglu_only",
@@ -63,10 +63,10 @@
     "num_params": 80982692,
     "warmup_steps": 20,
     "benchmark_steps": 100,
-    "total_time_seconds": 45.08387764899999,
-    "steps_per_second": 2.2180878224040277,
-    "avg_step_time_ms": 450.8387764899999,
-    "peak_memory_bytes": 1300599188,
-    "peak_memory_mb": 1240.3480415344238
+    "total_time_seconds": 44.422828494999976,
+    "steps_per_second": 2.251094839925727,
+    "avg_step_time_ms": 444.22828494999976,
+    "peak_memory_bytes": 976668408,
+    "peak_memory_mb": 931.4235763549805
   }
 ]
