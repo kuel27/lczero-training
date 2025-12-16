@@ -148,9 +148,8 @@ class MultiHeadAttention(nnx.Module):
         )
 
         assert (smol_gen_dense is not None) == config.HasField("smolgen")
-        self.smolgen = None
         if smol_gen_dense is not None:
-            self.smolgen = Smolgen(
+            self.smolgen: Optional[Smolgen] = Smolgen(
                 in_features=in_features,
                 config=config.smolgen,
                 defaults=defaults,
@@ -159,6 +158,8 @@ class MultiHeadAttention(nnx.Module):
                 norm_class=norm_class,
                 rngs=rngs,
             )
+        else:
+            self.smolgen = None
 
         # Axial 2D RoPE for 8x8 chessboard positional encoding
         head_dim = depth // config.heads
